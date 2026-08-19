@@ -1536,6 +1536,69 @@ mod tests {
       app
    }
 
+   /// A function registered on the builder resolves in a query the plugin serves. This test
+   /// covers that path end to end. Each layer below has its own tests in its own crate.
+   ///
+   /// The registry is process-global, so `plugin_shout` belongs to this test alone. A
+   /// second test in this binary needs a name of its own.
+   #[test]
+   fn registered_function_resolves_through_the_plugin() {
+      let temp_dir = tempfile::tempdir().unwrap();
+      let db_path = validate::validate_database_path(temp_dir.path().join("main.db")).unwrap();
+
+      let mut plugin = Builder::<MockRuntime>::new()
+         .register_function(ScalarFunction {
+            name: "plugin_shout".into(),
+            arity: 1,
+            deterministic: true,
+            invocation_scope: InvocationScope::DirectOnly,
+            handler: Arc::new(|args: &[SqlValueRef]| match &args[0] {
+               SqlValueRef::Text(text) => Ok(SqlValue::Text(text.to_uppercase())),
+               _ => Err(FunctionError::new("plugin_shout expects text")),
+            }),
+         })
+         .unwrap()
+         .register_database("MAIN", &db_path, None)
+         .unwrap()
+         .build()
+         .unwrap();
+
+      let app = mock_app();
+      plugin
+         .initialize(app.handle(), serde_json::Value::default())
+         .expect("plugin init should succeed");
+
+      tauri::async_runtime::block_on(async {
+         load_and_create_test_table(&app, "MAIN").await;
+
+         commands::execute(
+            app.state::<DbInstances>(),
+            "MAIN".to_string(),
+            "INSERT INTO test (val) VALUES ('quiet')".to_string(),
+            vec![],
+            None,
+         )
+         .await
+         .expect("insert should succeed");
+
+         let rows = commands::fetch_all(
+            app.state::<DbInstances>(),
+            "MAIN".to_string(),
+            "SELECT plugin_shout(val) AS shouted FROM test".to_string(),
+            vec![],
+            None,
+         )
+         .await
+         .expect("the query must resolve the registered function");
+
+         assert_eq!(rows.len(), 1);
+         assert_eq!(
+            rows[0].get("shouted").and_then(|value| value.as_str()),
+            Some("QUIET")
+         );
+      });
+   }
+
    #[tokio::test]
    async fn test_connect_to_database_registered_key() {
       let temp_dir = tempfile::tempdir().unwrap();
