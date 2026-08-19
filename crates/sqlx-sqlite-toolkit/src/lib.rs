@@ -55,5 +55,7 @@ pub use wrapper::{
 
 // Re-export commonly used types from dependencies
 pub use sqlx_sqlite_conn_mgr::{
-   AttachedMode, AttachedSpec, Migrator, SqliteDatabase, SqliteDatabaseConfig,
+   AttachedMode, AttachedSpec, FunctionError, InvocationScope, Migrator, ScalarFunction,
+   ScalarHandler, SqlValue, SqlValueRef, SqliteDatabase, SqliteDatabaseConfig, register_function,
+   register_or_replace_function,
 };

@@ -16,7 +16,8 @@ mod validate;
 
 pub use error::{Error, Result};
 pub use sqlx_sqlite_conn_mgr::{
-   AttachedMode, AttachedSpec, Migrator as SqliteMigrator, SqliteDatabaseConfig,
+   AttachedMode, AttachedSpec, FunctionError, InvocationScope, Migrator as SqliteMigrator,
+   ScalarFunction, ScalarHandler, SqlValue, SqlValueRef, SqliteDatabaseConfig,
 };
 pub use sqlx_sqlite_toolkit::{
    ActiveInterruptibleTransactions, ActiveRegularTransactions, DatabaseWrapper,
@@ -318,6 +319,24 @@ impl SetupRegistrar {
          .insert(key.to_string(), validated_database_info(path, migrator)?);
       Ok(())
    }
+
+   /// Register a scalar SQL function under the same contract as
+   /// [`Builder::register_function`]. The plugin's setup hook runs before any database
+   /// loads, so a function registered here reaches every database the plugin serves.
+   ///
+   /// Register here when the handler closes over something from the `app` instance. A
+   /// handler that needs nothing from `app` belongs on the builder itself.
+   pub fn register_function(&mut self, function: ScalarFunction) -> Result<()> {
+      sqlx_sqlite_conn_mgr::register_function(function)?;
+      Ok(())
+   }
+
+   /// Register a scalar SQL function, replacing the one already registered under the same
+   /// name and arity. See [`Builder::register_or_replace_function`].
+   pub fn register_or_replace_function(&mut self, function: ScalarFunction) -> Result<()> {
+      sqlx_sqlite_conn_mgr::register_or_replace_function(function)?;
+      Ok(())
+   }
 }
 
 /// Closure type for the deferred [`Builder::on_setup`] hook.
@@ -409,6 +428,87 @@ impl<R: Runtime> Builder<R> {
       self
          .database_info_by_key
          .insert(key.to_string(), validated_database_info(path, migrator)?);
+
+      Ok(self)
+   }
+
+   /// Register a scalar SQL function, callable by name from every query the plugin serves.
+   ///
+   /// The full contract lives in the [`sqlx_sqlite_conn_mgr::functions`] module
+   /// documentation. The plugin-level facts:
+   ///
+   /// - Register before the first `load` or `connect`. Each database captures the
+   ///   registered set when it connects, so a function registered here reaches every
+   ///   database the plugin serves.
+   /// - A returned [`FunctionError`] fails the statement and reports its message to the
+   ///   caller as error code `SQLITE_1`. Inside a transaction, the plugin's usual
+   ///   rollback behavior applies.
+   /// - Registration is process-global and takes effect at this call, not at
+   ///   [`build`](Self::build). A validation error appears at the call site. A builder
+   ///   discarded without `build()` still leaves its functions registered.
+   /// - When the handler needs the `app` instance, use
+   ///   [`SetupRegistrar::register_function`] instead.
+   /// - [`ScalarFunction::invocation_scope`] decides whether a schema object can call the
+   ///   function. [`InvocationScope::DirectOnly`] confines it to top-level SQL.
+   /// - The plugin does not support aggregate functions, window functions, collations,
+   ///   virtual tables, or functions defined in JavaScript.
+   ///
+   /// # Errors
+   ///
+   /// Returns `Err` for an invalid name or arity, a name a SQLite built-in already uses,
+   /// a name and arity pair already registered, or a function the linked SQLite library
+   /// refuses. See [`sqlx_sqlite_conn_mgr::register_function`] for the
+   /// variant-by-variant list.
+   ///
+   /// # Example
+   ///
+   /// ```no_run
+   /// use std::sync::Arc;
+   /// use tauri_plugin_sqlite::{
+   ///    Builder, FunctionError, InvocationScope, ScalarFunction, SqlValue, SqlValueRef,
+   /// };
+   ///
+   /// # fn example() -> tauri_plugin_sqlite::Result<()> {
+   /// Builder::<tauri::Wry>::new()
+   ///     .register_function(ScalarFunction {
+   ///        name: "normalize_for_search".into(),
+   ///        arity: 1,
+   ///        deterministic: true,
+   ///        invocation_scope: InvocationScope::DirectOnly,
+   ///        // SQLite's own lower() folds ASCII only, so Unicode case folding needs Rust.
+   ///        handler: Arc::new(|args: &[SqlValueRef]| match &args[0] {
+   ///           SqlValueRef::Text(text) => Ok(SqlValue::Text(text.to_lowercase())),
+   ///           SqlValueRef::Null => Ok(SqlValue::Null),
+   ///           _ => Err(FunctionError::new("normalize_for_search expects text")),
+   ///        }),
+   ///     })?
+   ///     .build()?;
+   /// # Ok(())
+   /// # }
+   /// ```
+   pub fn register_function(self, function: ScalarFunction) -> Result<Self> {
+      sqlx_sqlite_conn_mgr::register_function(function)?;
+
+      Ok(self)
+   }
+
+   /// Register a scalar SQL function, replacing the one already registered under the same
+   /// name and arity.
+   ///
+   /// Use this where a repeat registration is the caller's intent, such as a setup path a
+   /// test or a restart can run twice. [`register_function`](Self::register_function)
+   /// rejects the repeat instead. Everything else about the two calls matches, including
+   /// the validation and the connect-time rule: the replacement reaches the databases that
+   /// load after it, and a database already loaded keeps the handler it captured. See
+   /// [`sqlx_sqlite_conn_mgr::register_or_replace_function`].
+   ///
+   /// # Errors
+   ///
+   /// Returns `Err` for every reason
+   /// [`register_function`](Self::register_function) does, except a name and arity
+   /// already registered, which is the case this call accepts.
+   pub fn register_or_replace_function(self, function: ScalarFunction) -> Result<Self> {
+      sqlx_sqlite_conn_mgr::register_or_replace_function(function)?;
 
       Ok(self)
    }
