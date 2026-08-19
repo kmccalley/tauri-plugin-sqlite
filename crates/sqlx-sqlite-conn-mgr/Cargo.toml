@@ -19,6 +19,10 @@ tokio = { version = "1.49.0", features = ["full"] }
 tracing = { version = "0.1.44", default-features = false, features = ["std", "release_max_level_off"] }
 serde = { version = "1.0.228", features = ["derive"] }
 parking_lot = "0.12.3"
+# Registers consumer-supplied scalar functions on every pooled connection.
+# Pinned to the version sqlx-sqlite links: only one version of a `links`
+# crate can exist in a dependency graph.
+libsqlite3-sys = "0.35.0"
 
 [dev-dependencies]
 tempfile = "3.24.0"
