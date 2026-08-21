@@ -15,6 +15,8 @@ project needing SQLx connection management.
    * **WAL mode**: Enabled on first `acquire_writer()` call
    * **Idle timeout**: Connections close after 30s inactivity (configurable)
    * **No perpetual caching**: Zero minimum connections (prevents idle thread sprawl)
+   * **Scalar functions**: Either pool applies a registered Rust function to every
+     connection it opens, for every database this crate serves
 
 Delegates to SQLx's `SqlitePoolOptions` and `SqliteConnectOptions` wherever
 possible — minimal wrapper logic.
@@ -154,6 +156,36 @@ async fn example() -> Result<(), sqlx_sqlite_conn_mgr::Error> {
 > circumvents the connection manager's policies and will result in
 > unpredictable behavior, including potential deadlocks.
 
+### Scalar Functions
+
+`register_function` records a Rust function. Every database whose `connect` runs after the
+registration keeps that function available on every connection either of its pools opens.
+
+```rust
+use std::sync::Arc;
+use sqlx_sqlite_conn_mgr::{
+   FunctionError, InvocationScope, ScalarFunction, SqlValue, SqlValueRef, register_function,
+};
+
+register_function(ScalarFunction {
+   name: "normalize_for_search".into(),
+   arity: 1,
+   deterministic: true,
+   invocation_scope: InvocationScope::DirectOnly,
+   // SQLite's own lower() folds ASCII only, so Unicode case folding needs Rust.
+   handler: Arc::new(|args: &[SqlValueRef]| match &args[0] {
+      SqlValueRef::Text(text) => Ok(SqlValue::Text(text.to_lowercase())),
+      SqlValueRef::Null => Ok(SqlValue::Null),
+      _ => Err(FunctionError::new("normalize_for_search expects text")),
+   }),
+})?;
+```
+
+The full contract (connection-scoped registration, connect-time snapshots, the invocation
+scope, panic behavior, and the validation list) lives in the `functions` module
+documentation (src/functions.rs). Aggregate functions, window
+functions, collations, and virtual tables are not supported.
+
 ## API Reference
 
 ### `SqliteDatabase`
@@ -166,6 +198,28 @@ async fn example() -> Result<(), sqlx_sqlite_conn_mgr::Error> {
 | `run_migrations(migrator)` | Run pending migrations from a `Migrator` |
 | `close()` | Close and remove from cache |
 | `remove()` | Close and delete database files (.db, .db-wal, .db-shm) |
+
+### `register_function`
+
+| Function | Description |
+| -------- | ----------- |
+| `register_function(function)` | Register a `ScalarFunction` for every database that connects after the call |
+| `register_or_replace_function(function)` | The same, replacing the function already registered under the name and arity |
+
+Each of these fails at the call:
+
+   * an empty name
+   * a name over 255 bytes
+   * a name holding a NUL byte
+   * a negative arity
+   * a name a SQLite built-in already uses
+   * a name and arity pair already registered, unless the call is
+     `register_or_replace_function`
+   * a function the linked SQLite library refuses
+
+The registry compares names case-insensitively. This matches how SQLite resolves them. The
+call also registers the function on a temporary in-memory connection. A library that
+refuses the function there returns an error naming the function and its reason.
 
 ### `WriteGuard`
 

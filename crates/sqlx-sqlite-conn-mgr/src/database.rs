@@ -3,6 +3,7 @@
 use crate::Result;
 use crate::config::SqliteDatabaseConfig;
 use crate::error::Error;
+use crate::functions;
 use crate::observer_slot::ObserverSlot;
 use crate::registry::{get_or_open_database, is_memory_database, uncache_database};
 use crate::write_guard::WriteGuard;
@@ -180,12 +181,27 @@ impl SqliteDatabase {
             .read_only(true)
             .optimize_on_close(true, OPTIMIZE_ANALYSIS_LIMIT);
 
+         // The functions this database serves: the set registered before this connect.
+         // Both pools install this same snapshot on every connection they ever open, so
+         // one database never serves connections with differing function sets. A
+         // registration made after this call applies to the next database to connect.
+         let registered_functions = functions::snapshot();
+
+         // SQLite keeps a scalar function in per-connection state, so every connection
+         // either pool opens must have the whole snapshot. `after_connect` is the only
+         // hook that can do this. Both pools open connections lazily and drop them after
+         // the idle timeout, so a one-time pass over the connections open at startup will
+         // miss every connection opened later. sqlx runs this hook before it hands the
+         // connection to a caller. If the hook returns an error, sqlx discards the
+         // connection, so no caller ever receives a connection that lacks a registered
+         // function.
          let read_pool = SqlitePoolOptions::new()
             .max_connections(config.max_read_connections)
             .min_connections(0)
             .idle_timeout(Some(std::time::Duration::from_secs(
                config.idle_timeout_secs,
             )))
+            .after_connect(functions::install_hook(&registered_functions))
             .connect_with(read_options)
             .await?;
 
@@ -213,6 +229,8 @@ impl SqliteDatabase {
             .idle_timeout(Some(std::time::Duration::from_secs(
                config.idle_timeout_secs,
             )))
+            // Registered scalar functions. See the read pool above for why this hook is here.
+            .after_connect(functions::install_hook(&registered_functions))
             .after_release(|conn, _meta| {
                Box::pin(async move {
                   match sqlx::query("ROLLBACK").execute(&mut *conn).await {

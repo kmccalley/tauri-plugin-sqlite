@@ -8,6 +8,7 @@
 //! - **[`SqliteDatabase`]**: Main database type with separate read and write connection pools
 //! - **[`SqliteDatabaseConfig`]**: Configuration for connection pool settings
 //! - **[`WriteGuard`]**: RAII guard ensuring exclusive write access
+//! - **[`ScalarFunction`]**: A scalar SQL function to register on every connection
 //! - **[`Migrator`]**: Re-exported from sqlx for running database migrations
 //! - **[`Error`]**: Error type for database operations
 //!
@@ -17,6 +18,8 @@
 //! - **Lazy WAL mode**: Write-Ahead Logging enabled automatically on first write
 //! - **Exclusive writes**: Single-connection write pool enforces serialized write access
 //! - **Concurrent reads**: Multiple readers can query simultaneously via the read pool
+//! - **Scalar functions**: [`register_function`] applies a consumer's Rust function to
+//!   every connection of every database whose `connect` runs after the registration
 //!
 //! ## Usage
 //!
@@ -64,6 +67,7 @@ mod attached;
 mod config;
 mod database;
 mod error;
+pub mod functions;
 mod observer_slot;
 mod registry;
 mod write_guard;
@@ -76,6 +80,10 @@ pub use attached::{
 pub use config::SqliteDatabaseConfig;
 pub use database::SqliteDatabase;
 pub use error::Error;
+pub use functions::{
+   FunctionError, InvocationScope, ScalarFunction, ScalarHandler, SqlValue, SqlValueRef,
+   register_function, register_or_replace_function,
+};
 pub use observer_slot::ObserverSlot;
 pub use write_guard::WriteGuard;
 

@@ -22,6 +22,8 @@ SQLite database interface for Tauri applications using
    * **Migration Support**: SQLx's migration framework
    * **Resource Management**: Proper cleanup on application exit
    * **Optional Change Notifications**: SQLite hooks for reactive change notifications
+   * **Scalar Functions in Rust**: register a Rust function and call it by name from
+     any query the plugin serves
 
 ## Architecture
 
@@ -940,6 +942,82 @@ async fn example<R: Runtime>(app: tauri::AppHandle<R>) -> tauri_plugin_sqlite::R
    Ok(())
 }
 ```
+
+### Scalar Functions
+
+Register a Rust function once and call it by name from any query the plugin serves. This
+puts work that needs native code inside the query, so SQLite applies it while it scans.
+The alternative reads every candidate row out of the database and applies the same logic
+in the caller.
+
+```rust
+use std::sync::Arc;
+use tauri_plugin_sqlite::{
+   Builder, FunctionError, InvocationScope, ScalarFunction, SqlValue, SqlValueRef,
+};
+
+Builder::new()
+   .register_function(ScalarFunction {
+      name: "normalize_for_search".into(),
+      arity: 1,
+      deterministic: true,
+      invocation_scope: InvocationScope::DirectOnly,
+      // SQLite's own lower() folds ASCII only, so Unicode case folding needs Rust.
+      handler: Arc::new(|args: &[SqlValueRef]| match &args[0] {
+         SqlValueRef::Text(text) => Ok(SqlValue::Text(text.to_lowercase())),
+         SqlValueRef::Null => Ok(SqlValue::Null),
+         _ => Err(FunctionError::new("normalize_for_search expects text")),
+      }),
+   })?
+   .build()?;
+```
+
+Any query can then call it, from the frontend or from Rust:
+
+```sql
+SELECT d.Title AS title
+  FROM Document d
+ WHERE normalize_for_search(d.Title) LIKE $1
+```
+
+Register a function inside `on_setup` instead when its handler needs the `app` instance:
+
+```rust
+Builder::new()
+   .on_setup(|app, reg| {
+      reg.register_database(MAIN_DB_KEY, app.path().app_data_dir()?.join("main.db"), None)?;
+      reg.register_function(ScalarFunction { /* ... */ })?;
+      Ok(())
+   })
+   .build()?;
+```
+
+The full contract lives in the `sqlx_sqlite_conn_mgr::functions` module documentation
+(crates/sqlx-sqlite-conn-mgr/src/functions.rs). The short version:
+
+   * Register before the first `load` or `connect`. Each database captures the registered
+     set when it connects, for every connection it ever opens.
+   * `invocation_scope` decides where SQLite accepts a call.
+     `InvocationScope::DirectOnly` confines the function to top-level SQL, so SQLite
+     refuses a call from inside a view, a trigger, a CHECK constraint, an expression
+     index, or any other schema object. `InvocationScope::Schema` and
+     `InvocationScope::InnocuousSchema` accept a call from a schema object, which is what
+     a view over the function needs.
+   * Validation happens at the `register_function` call: an invalid name or arity, a name
+     a SQLite built-in already uses, a duplicate name and arity pair, and a function the
+     linked SQLite library refuses all fail there.
+   * `register_or_replace_function` accepts a name and arity already registered, for a
+     setup path that runs twice. The replacement reaches the databases that load after
+     it, and a database already loaded keeps the handler it captured.
+   * The handler receives borrowed arguments (`SqlValueRef`), including SQL NULL, and
+     returns an owned `SqlValue`. A returned `FunctionError` fails the statement with
+     error code `SQLITE_1` and the handler's message.
+   * A panicking handler produces an error naming the function and leaves the pool
+     usable, under `panic = "unwind"` (the Rust default). Under `panic = "abort"`, the
+     process aborts.
+
+Aggregate functions, window functions, collations, virtual tables, and functions defined
+in JavaScript are not supported.
 
 ### Basic Operations
 
